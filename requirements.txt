@@ -1,0 +1,5 @@
+streamlit>=1.36
+pandas>=2.2
+streamlit-geolocation>=0.0.10
+python-dateutil>=2.9
+twilio>=9.0
