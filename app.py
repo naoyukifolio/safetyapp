@@ -1,34 +1,19 @@
 import os
 import json
 import sqlite3
-import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
-
 import pandas as pd
 import streamlit as st
 
-# Twilio (SMS)
-TWILIO_READY = False
-try:
-    from twilio.rest import Client as TwilioClient
-    TWILIO_READY = True
-except Exception:
-    TWILIO_READY = False
-
-APP_TITLE = "安否確認（QR自動登録・HTTP対応版）"
-DB_PATH = "safetycheck.db"
+APP_TITLE = "安否確認（QR自動登録・管理）"
 TZ = ZoneInfo("Asia/Tokyo")
 
-# 環境変数
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
-TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
-TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER", "")
+# ✅ DB 永続保存パス（Streamlit Cloud 推奨領域）
+DB_DIR = os.path.join(os.getcwd(), ".streamlit")
+os.makedirs(DB_DIR, exist_ok=True)
+DB_PATH = os.path.join(DB_DIR, "safetycheck.db")
 
-SMS_ENABLED = TWILIO_READY and all([
-    TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER
-])
 
 # ==========================================================
 # DB 初期化
@@ -45,7 +30,7 @@ def init_db():
                 addr TEXT,
                 school TEXT,
                 tel TEXT,
-                status TEXT,
+                status TEXT DEFAULT '無事',
                 raw_params TEXT,
                 sms_sent INTEGER DEFAULT 0,
                 user_agent TEXT
@@ -53,66 +38,6 @@ def init_db():
             """
         )
         conn.commit()
-
-
-# ==========================================================
-# DB 入出力・重複対策
-# ==========================================================
-def insert_record(payload: dict):
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO checkins (
-                ts, nick, addr, school, tel, status,
-                raw_params, sms_sent, user_agent
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                payload["ts"],
-                payload.get("nick"),
-                payload.get("addr"),
-                payload.get("school"),
-                payload.get("tel"),
-                payload.get("status"),
-                json.dumps(payload.get("raw_params"), ensure_ascii=False),
-                int(payload.get("sms_sent", 0)),
-                payload.get("user_agent"),
-            ),
-        )
-        conn.commit()
-
-
-def load_history(filters: dict | None = None, limit: int | None = None):
-    sql = "SELECT * FROM checkins WHERE 1=1"
-    params = []
-    if filters:
-        if filters.get("nick"):
-            sql += " AND nick LIKE ?"
-            params.append(f"%{filters['nick']}%")
-    sql += " ORDER BY id DESC"
-    if limit:
-        sql += f" LIMIT {int(limit)}"
-    with sqlite3.connect(DB_PATH) as conn:
-        df = pd.read_sql_query(sql, conn, params=params)
-    return df
-
-
-def dedup_key(payload: dict):
-    t_bucket = datetime.now(TZ).replace(second=0, microsecond=0).isoformat()
-    return f"{t_bucket}|{payload.get('nick')}|{payload.get('status')}"
-
-
-def save_once(payload: dict) -> bool:
-    key = dedup_key(payload)
-    if "saved_keys" not in st.session_state:
-        st.session_state["saved_keys"] = set()
-    if key in st.session_state["saved_keys"]:
-        return False
-    insert_record(payload)
-    st.session_state["saved_keys"].add(key)
-    return True
 
 
 # ==========================================================
@@ -132,39 +57,61 @@ def get_query_params():
 
 
 def normalize_params(params: dict):
-    out = {"nick": "", "addr": "", "school": "", "tel": ""}
+    keys = {"nick": "", "addr": "", "school": "", "tel": ""}
     mapping = {
-        "nick": ["nick", "name"],
-        "addr": ["addr", "address"],
-        "school": ["school"],
-        "tel": ["tel", "phone"],
+        "nick": ["nick", "n"],
+        "addr": ["addr", "a"],
+        "school": ["school", "s"],
+        "tel": ["tel", "p", "phone"],
     }
     for std, aliases in mapping.items():
         for k in aliases:
-            if k in params and params[k]:
-                out[std] = params[k]
+            if k in params:
+                keys[std] = params[k]
                 break
-    return out
-
-
-def try_send_sms(to_number: str, message: str) -> bool:
-    if not SMS_ENABLED:
-        return False
-    try:
-        client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        client.messages.create(
-            to=to_number,
-            from_=TWILIO_FROM_NUMBER,
-            body=message
-        )
-        return True
-    except Exception as e:
-        st.warning(f"SMS送信に失敗: {e}")
-        return False
+    return keys
 
 
 # ==========================================================
-# ユーザーモード（自動登録）
+# DB 操作
+# ==========================================================
+def insert_record(payload: dict):
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO checkins (
+                ts, nick, addr, school, tel, status,
+                raw_params, sms_sent, user_agent
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload["ts"], payload.get("nick"), payload.get("addr"),
+                payload.get("school"), payload.get("tel"),
+                payload.get("status", "無事"),
+                json.dumps(payload.get("raw_params"), ensure_ascii=False),
+                int(payload.get("sms_sent", 0)),
+                payload.get("user_agent"),
+            ),
+        )
+        conn.commit()
+
+
+def load_history(limit=None, nick_filter=None):
+    sql = "SELECT * FROM checkins WHERE 1=1"
+    params = []
+    if nick_filter:
+        sql += " AND nick LIKE ?"
+        params.append(f"%{nick_filter}%")
+    sql += " ORDER BY id DESC"
+    if limit:
+        sql += f" LIMIT {int(limit)}"
+    with sqlite3.connect(DB_PATH) as conn:
+        return pd.read_sql_query(sql, conn, params=params)
+
+
+# ==========================================================
+# 自動登録
 # ==========================================================
 def auto_register(params, raw_params):
     payload = {
@@ -173,14 +120,13 @@ def auto_register(params, raw_params):
         "addr": params["addr"],
         "school": params["school"],
         "tel": params["tel"],
-        "status": "無事",               # 初期値
+        "status": "無事",
         "raw_params": raw_params,
         "sms_sent": 0,
-        "user_agent": st.session_state.get("_user_agent_", ""),
+        "user_agent": st.session_state.get("_user_agent_", "")
     }
-    saved = save_once(payload)
-    if saved:
-        st.success("安否情報を自動登録しました（無事）。")
+    insert_record(payload)
+    st.success("安否情報を自動登録しました（ステータス：無事）")
 
 
 # ==========================================================
@@ -191,52 +137,56 @@ def main():
     st.title(APP_TITLE)
 
     init_db()
-    mode = st.sidebar.radio("モード", ["ユーザー", "管理者"], index=0)
 
+    mode = st.sidebar.radio("モード選択", ["利用者", "管理者"], index=0)
     raw_params = get_query_params()
     params = normalize_params(raw_params)
 
-    if mode == "ユーザー":
-        st.caption("QR読み取りで開くだけで、自動で安否登録されます。（HTTP対応：位置情報は記録しません）")
+    if mode == "利用者":
+        st.caption("QR読み取りでこのページを開くと自動で安否情報が記録されます。")
 
-        st.markdown("### QRデータ")
-        st.write(f"ニックネーム: **{params['nick'] or '（未指定）'}**")
-        st.write(f"住所: **{params['addr'] or '（未指定）'}**")
-        st.write(f"学校: **{params['school'] or '（未指定）'}**")
-        st.write(f"保護者電話: **{params['tel'] or '（未指定）'}**")
+        with st.container(border=True):
+            st.subheader("QRデータ")
+            st.write(f"ニックネーム：**{params['nick']}**")
+            st.write(f"住所：{params['addr']}")
+            st.write(f"学校：{params['school']}")
+            st.write(f"保護者電話：{params['tel']}")
 
-        auto_register(params, raw_params)
+        if params["nick"]:
+            auto_register(params, raw_params)
 
-        st.markdown("### 直近履歴")
-        df = load_history(filters={"nick": params.get("nick")}, limit=50)
+        st.subheader("最近の登録履歴")
+        df = load_history(limit=20, nick_filter=params["nick"])
         st.dataframe(df, use_container_width=True)
 
     else:
-        st.sidebar.markdown("### 管理者ログイン")
+        st.sidebar.subheader("管理者パスワード入力")
         pw = st.sidebar.text_input("パスワード", type="password")
-        if not ADMIN_PASSWORD:
-            st.error("ADMIN_PASSWORD が未設定です。")
+        admin_pw = os.environ.get("ADMIN_PASSWORD", "")
+
+        if not admin_pw:
+            st.error("管理パスワードが環境設定されていません。")
             return
-        if pw != ADMIN_PASSWORD:
-            st.warning("正しいパスワードを入力してください。")
+
+        if pw != admin_pw:
+            st.warning("パスワードが一致しません。")
             return
 
-        st.success("管理者モード中")
+        st.success("管理者アクセス許可")
 
-        st.markdown("### フィルタ")
-        nick_f = st.text_input("ニックネーム検索")
+        st.subheader("履歴一覧")
+        nick_filter = st.text_input("ニックネーム検索")
+        limit = st.number_input("表示件数", min_value=20, max_value=2000, value=200, step=20)
 
-        df = load_history(filters={"nick": nick_f}, limit=500)
+        df = load_history(limit=int(limit), nick_filter=nick_filter)
         st.dataframe(df, use_container_width=True)
 
         st.download_button(
             "CSVダウンロード",
             df.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"checkins_{datetime.now(TZ).strftime('%Y%m%d_%H%M%S')}.csv",
+            file_name="safetycheck_history.csv",
             mime="text/csv"
         )
-
-        st.caption("※HTTP版は地図表示は無効")
 
 
 if __name__ == "__main__":
