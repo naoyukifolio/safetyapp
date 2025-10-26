@@ -3,20 +3,21 @@ import urllib.parse
 import pandas as pd
 import streamlit as st
 import qrcode
-from PIL import Image     # ✅追加
+from PIL import Image
 from io import BytesIO
 from reportlab.pdfgen import canvas
 from reportlab.lib.units import mm
 
-APP_TITLE = "QRコード発行アプリ（安否登録・Excel対応）"
+APP_TITLE = "QRコード発行アプリ（安否登録・Excel対応版）"
 
-CONFIRM_BASE_URL = os.environ.get("CONFIRM_BASE_URL", "http://localhost:8501")
+# ✅ 安否確認アプリ本番URL（固定）
+CONFIRM_BASE_URL = "https://safetyapp-bv9ixyua6uhnitoappb7ss.streamlit.app"
 
-# ✅ クレジットカードサイズ
+# ✅ クレジットカードサイズ（85.6 × 54 mm）
 credit_card = (85.6 * mm, 54.0 * mm)
 
 
-def make_qr_url(nick, addr, school, tel):
+def make_qr_url(nick: str, addr: str, school: str, tel: str) -> str:
     params = dict(nick=nick, addr=addr, school=school, tel=tel)
     query = urllib.parse.urlencode(params, encoding="utf-8", safe="=")
     return f"{CONFIRM_BASE_URL}/?{query}"
@@ -32,7 +33,7 @@ def generate_qr_image(data: str) -> bytes:
     return buf.getvalue()
 
 
-def create_pdf(cards):
+def create_pdf(cards: list) -> bytes:
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=credit_card)
 
@@ -41,7 +42,7 @@ def create_pdf(cards):
             c.showPage()
 
         qr_size = 30 * mm
-        qr_img = Image.open(BytesIO(card["qr_img"]))   # ✅修正
+        qr_img = Image.open(BytesIO(card["qr_img"]))
 
         c.drawInlineImage(qr_img, 50 * mm, 10 * mm, qr_size, qr_size)
 
@@ -65,7 +66,7 @@ def main():
     st.set_page_config(page_title=APP_TITLE)
     st.title(APP_TITLE)
 
-    st.info("Excel（.xlsx）からQR名札PDFを発行できます。")
+    st.info("Excel（.xlsx）からQR名札PDFを発行します。")
     st.caption("必要列：nick, addr, school, tel")
 
     uploaded = st.file_uploader("児童情報Excelをアップロード", type=["xlsx"])
@@ -74,9 +75,9 @@ def main():
         df = pd.read_excel(uploaded, dtype=str).fillna("")
         st.dataframe(df, use_container_width=True)
 
-        required = {"nick", "addr", "school", "tel"}
-        if not required.issubset(df.columns):
-            st.error(f"Excelに必要列がありません: {required}")
+        required_cols = {"nick", "addr", "school", "tel"}
+        if not required_cols.issubset(df.columns):
+            st.error(f"Excelに必要列がありません: {required_cols}")
             return
 
         if st.button("QR名札PDFを作成"):
@@ -93,7 +94,7 @@ def main():
                 })
 
             pdf = create_pdf(cards)
-            st.success("PDFを生成しました。")
+            st.success("PDFを生成しました。ダウンロードしてください。")
 
             st.download_button(
                 label="QR名札PDFダウンロード",
@@ -102,7 +103,7 @@ def main():
                 mime="application/pdf",
             )
 
-    st.caption("※ CONFIRM_BASE_URL を適切なURLに設定してください。")
+    st.caption("※ URLは本番用に固定設定されています。")
 
 
 if __name__ == "__main__":
